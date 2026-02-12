@@ -10,6 +10,10 @@ from task_manager.services.department_service import DepartmentService
 from task_manager.services.mom_service import MOMService
 from task_manager.services.task_service import TaskService
 from task_manager.storage.json_store import JsonStore
+from task_manager.excel_report.importer import ExcelImporter
+from task_manager.excel_report.analyzer import DataAnalyzer
+from task_manager.excel_report.report_html import HTMLReportGenerator
+from task_manager.excel_report.report_excel import ExcelReportGenerator
 
 
 class TaskManagerApp:
@@ -197,6 +201,66 @@ class TaskManagerApp:
             print(f"  [{t.id[:8]}] [{t.priority.value.upper()}] {t.title} "
                   f"-> {t.assigned_to} ({t.status.value})")
 
+    # -- Excel Import & Report commands --
+
+    def cmd_import_excel(self, args: argparse.Namespace) -> None:
+        """Import an Excel file, analyze it, and generate reports."""
+        import os
+
+        file_path = args.file
+        if not os.path.isfile(file_path):
+            print(f"Error: File not found: {file_path}", file=sys.stderr)
+            sys.exit(1)
+
+        sheet_names = args.sheets if args.sheets else None
+        has_header = not args.no_header
+        output_format = args.format
+        output_dir = args.output_dir or os.path.dirname(os.path.abspath(file_path))
+
+        os.makedirs(output_dir, exist_ok=True)
+
+        base_name = os.path.splitext(os.path.basename(file_path))[0]
+
+        print(f"Importing: {file_path}")
+        importer = ExcelImporter()
+        import_result = importer.import_file(
+            file_path, sheet_names=sheet_names, has_header=has_header
+        )
+        print(f"  Sheets: {len(import_result.sheets)}")
+        print(f"  Total rows: {import_result.total_rows}")
+        print(f"  Total columns: {import_result.total_columns}")
+
+        print("Analyzing data...")
+        analyzer = DataAnalyzer()
+        analysis = analyzer.analyze(import_result)
+        print(f"  Data quality score: {round(analysis.overall_quality_score, 1)}%")
+
+        # Show detected types summary
+        for sheet_analysis in analysis.sheets:
+            print(f"\n  Sheet: {sheet_analysis.sheet_name}")
+            for cs in sheet_analysis.column_stats:
+                print(f"    {cs.header}: {cs.data_type.value} "
+                      f"({round(cs.completeness, 1)}% complete, "
+                      f"{cs.unique_count} unique)")
+
+        generated = []
+
+        if output_format in ("html", "all"):
+            html_path = os.path.join(output_dir, f"{base_name}_report.html")
+            html_gen = HTMLReportGenerator(preview_rows=args.preview_rows)
+            html_gen.generate(import_result, analysis, html_path)
+            generated.append(html_path)
+            print(f"\n  HTML report: {html_path}")
+
+        if output_format in ("excel", "all"):
+            excel_path = os.path.join(output_dir, f"{base_name}_report.xlsx")
+            excel_gen = ExcelReportGenerator(preview_rows=args.preview_rows)
+            excel_gen.generate(import_result, analysis, excel_path)
+            generated.append(excel_path)
+            print(f"  Excel report: {excel_path}")
+
+        print(f"\nDone! Generated {len(generated)} report(s).")
+
 
 def build_parser(app: TaskManagerApp) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -305,6 +369,43 @@ def build_parser(app: TaskManagerApp) -> argparse.ArgumentParser:
     p = subparsers.add_parser("mom-tasks", help="List tasks linked to a MOM")
     p.add_argument("mom_id")
     p.set_defaults(func=app.cmd_mom_tasks)
+
+    # -- Excel Import & Report --
+    p = subparsers.add_parser(
+        "import-excel",
+        help="Import an Excel file, analyze data types, and generate a smart report",
+    )
+    p.add_argument("file", help="Path to the Excel file (.xlsx)")
+    p.add_argument(
+        "--sheets",
+        nargs="*",
+        default=None,
+        help="Specific sheet names to import (default: all sheets)",
+    )
+    p.add_argument(
+        "--no-header",
+        action="store_true",
+        default=False,
+        help="Treat the first row as data, not headers",
+    )
+    p.add_argument(
+        "--format",
+        choices=["html", "excel", "all"],
+        default="all",
+        help="Output report format (default: all)",
+    )
+    p.add_argument(
+        "--output-dir",
+        default=None,
+        help="Directory for output reports (default: same as input file)",
+    )
+    p.add_argument(
+        "--preview-rows",
+        type=int,
+        default=20,
+        help="Number of data rows to include in preview (default: 20)",
+    )
+    p.set_defaults(func=app.cmd_import_excel)
 
     return parser
 
